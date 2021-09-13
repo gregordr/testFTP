@@ -3,8 +3,10 @@ const Writable = require('stream').Writable;
 const fs = require("fs")
 var FormData = require('form-data');
 const axios = require("axios");
+const { Path } = require('webdav-server/lib/index.v2');
 
 axios.defaults.headers.post["Content-Type"] = "application/x-www-form-urlencoded";
+axios.defaults.headers.get["Content-Type"] = "application/x-www-form-urlencoded";
 
 class LocalLockManager {
     locks = [];
@@ -57,7 +59,6 @@ class SavePhotoStream extends Writable {
     blobs = []
 
     _write(chunk, encoding, callback) {
-        fs.appendFileSync(this.name, chunk)
         this.blobs.push(chunk)
         callback(null)
     }
@@ -87,6 +88,18 @@ class SavePhotoStream extends Writable {
 
 }
 
+cachedPhotos = { lastCheck: null, photos: [] }
+
+const getCachedPhotos = async () => {
+    if (!cachedPhotos.lastCheck || cachedPhotos.lastCheck < Date.now() - 1000 * 60) {
+
+        cachedPhotos.photos = axios.get("http://localhost:4000/media/all")
+        cachedPhotos.lastCheck = Date.now();
+    }
+
+    return (await cachedPhotos.photos).data.slice(0,10000);
+}
+
 // File system
 class UploadFS extends webdav.FileSystem {
     props = new webdav.LocalPropertyManager();
@@ -94,10 +107,18 @@ class UploadFS extends webdav.FileSystem {
 
     created = {}
 
-    _fastExistCheck = function (ctx, path, callback) {
-        const res = path.isRoot() || this.created[path.toString()]
-        console.log("chech", path, res)
-        callback(res);
+    _fastExistCheck = async function (ctx, path, callback) {
+        if (path.isRoot() || this.created[path.toString()] || path.toString() === "/all photos")
+            return callback(true);
+
+        if (path.rootName() === "all photos") {
+            return callback(true)
+            const photos = await getCachedPhotos()
+            if (photos.find((photo) => photo.name === path.fileName()))
+                return callback(true)
+        }
+
+        callback(false)
     }
 
     _create = function (path, ctx, callback) {
@@ -112,24 +133,40 @@ class UploadFS extends webdav.FileSystem {
     }
 
     _propertyManager = function (path, info, callback) {
-        console.log("Pman", path);
         callback(null, this.props);
     }
 
     _lockManager = function (path, info, callback) {
-        console.log("Lman", path,
-            this.locks);
         callback(null, this.locks);
     }
 
     _type = function (path, info, callback) {
-        callback(null, path.isRoot() ? webdav.ResourceType.Directory : webdav.ResourceType.File);
+        callback(null, path.isRoot() || path.toString() === "/all photos" ? webdav.ResourceType.Directory : webdav.ResourceType.File);
     }
 
     _delete = function (path, ctx, cb) {
         console.log("delete", path)
         this.created = {}
         cb(null)
+    }
+
+    _readDir = async function (path, ctx, cb) {
+        if (path.isRoot())
+            return cb(null, [new Path(["all photos"])])
+
+        if (path.removeFile() === "all photos") {
+            let paths = []
+
+            const res = await getCachedPhotos()
+
+            for (const photo of res) {
+                paths.push(new Path(photo.name))
+            }
+
+            return cb(null, paths)
+        }
+
+        cb(null, [])
     }
 }
 
@@ -138,5 +175,5 @@ const server = new webdav.WebDAVServer({
     port: 1901, // Load the server on the port 2000 (if not specified, default is 1900)
 });
 server.setFileSystemSync('/', new UploadFS());
-server.start((s) => console.log('Ready on port', s.address().port));
+server.startAsync((s) => console.log('Ready on port', s.address().port));
 
