@@ -1,6 +1,5 @@
 const webdav = require('webdav-server').v2;
 const Writable = require('stream').Writable;
-const fs = require("fs")
 var FormData = require('form-data');
 const axios = require("axios");
 const { Path } = require('webdav-server/lib/index.v2');
@@ -97,7 +96,7 @@ const getCachedPhotos = async () => {
         cachedPhotos.lastCheck = Date.now();
     }
 
-    return (await cachedPhotos.photos).data.slice(0,10000);
+    return (await cachedPhotos.photos).data.slice(0);
 }
 
 // File system
@@ -175,5 +174,104 @@ const server = new webdav.WebDAVServer({
     port: 1901, // Load the server on the port 2000 (if not specified, default is 1900)
 });
 server.setFileSystemSync('/', new UploadFS());
-server.startAsync((s) => console.log('Ready on port', s.address().port));
+//server.startAsync((s) => console.log('Ready on port', s.address().port));
 
+const FtpSrv = require('ftp-srv');
+const moment = require('moment');
+const fsAsync = require('ftp-srv/src/helpers/fs-async');
+const ftpServer = new FtpSrv({anonymous:true});
+
+ftpServer.on('login', (data, resolve, reject) => {
+    resolve({fs: new myFS()})
+ });
+
+ftpServer.listen()
+.then(() => { console.log("listening")});
+
+class myFS {
+  constructor(connection, {root, cwd} = {}) {
+    this.connection = connection;
+  }
+
+  get root() {
+    return "/"
+  }
+
+  currentDirectory() {
+    return "/";
+  }
+
+   async get(fileName) {
+        return {
+            isDirectory: () => true
+        }
+  }
+
+    async list(path = '.') {
+      
+    console.log("list", path)
+    let fileNames = await getCachedPhotos()
+        return fileNames.map((photo) => {
+          return {
+                name: photo.id,
+              isDirectory: () => false,
+              mtime: moment.unix(photo.date),
+                size: 10000000000
+          }
+      });
+  }
+
+    chdir(path = '.') {
+      
+    return "/"
+  }
+
+  write(fileName, {append = false, start = undefined} = {}) {
+    return  new SavePhotoStream(fileName)
+    ;
+  }
+
+async read(fileName, { start = undefined } = {}) {
+    console.log("read", fileName)
+
+    let stream =  await axios({
+        method: 'get',
+        url: 'http://localhost:4000/media/'+fileName,
+        responseType: 'stream'
+    });
+
+
+
+    return stream.data
+  }
+
+  delete(path) {
+    const {fsPath} = this._resolvePath(path);
+    return fsAsync.stat(fsPath)
+    .then((stat) => {
+      if (stat.isDirectory()) return fsAsync.rmdir(fsPath);
+      else return fsAsync.unlink(fsPath);
+    });
+  }
+
+  mkdir(path) {
+    const {fsPath} = this._resolvePath(path);
+    return fsAsync.mkdir(fsPath)
+    .then(() => fsPath);
+  }
+
+  rename(from, to) {
+    const {fsPath: fromPath} = this._resolvePath(from);
+    const {fsPath: toPath} = this._resolvePath(to);
+    return fsAsync.rename(fromPath, toPath);
+  }
+
+  chmod(path, mode) {
+    const {fsPath} = this._resolvePath(path);
+    return fsAsync.chmod(fsPath, mode);
+  }
+
+  getUniqueName() {
+    return uuid.v4().replace(/\W/g, '');
+  }
+}
